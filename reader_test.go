@@ -1,12 +1,3 @@
-# zipiterator
-Package zipiterator is a file iterator for zip archive with no need to supply io.ReaderAt and total size, that is, just only normal io.Reader.
-
-## Implementation
-Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), and .ZIP file format specification
-is [here](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
-
-## Examples
-```go
 package zipiterator
 
 import (
@@ -77,10 +68,3 @@ func TestNewReader(t *testing.T) {
 	}
 
 }
-
-```
-
-## Limitation
-
-- Repeatable read is unsupported.
-- Some `central directory header` field is not resolved, such as "version made by", "internal file attributes", "external file attributes", "relative offset of local header".
