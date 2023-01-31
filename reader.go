@@ -422,9 +422,6 @@ type checksumReader struct {
 }
 
 func (r *checksumReader) Read(b []byte) (n int, err error) {
-	if r.entry.eof {
-		return 0, errors.New("reach end of file")
-	}
 	if r.err != nil {
 		return 0, r.err
 	}
