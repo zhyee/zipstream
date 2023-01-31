@@ -2,86 +2,77 @@
 Package zipiterator is a file iterator for zip archive with no need to supply io.ReaderAt and total size, that is, just only normal io.Reader.
 
 ## Implementation
-Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), and .ZIP file format specification
+Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), and reference .ZIP file format specification
 is [here](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+
+## Usage
+> go get github.com/zhyee/zipiterator
 
 ## Examples
 ```go
-package zipiterator
+package main
 
 import (
-	"archive/zip"
-	"fmt"
 	"io"
+	"log"
 	"os"
-	"testing"
+
+	"github.com/zhyee/zipiterator"
 )
 
-func TestNewReader(t *testing.T) {
+func main() {
 
-	f, err := os.Open("testData/zipiterator.code.zip")
+	f, err := os.Open("./zipiterator.code.zip")
 	if err != nil {
-		t.Fatal(err)
+		log.Fatal(err)
 	}
 	defer f.Close()
 
-	z := NewReader(f)
+	zr := zipiterator.NewReader(f)
 
-	entryCnt := 0
 	for {
-		entry, err := z.GetNextEntry()
+		e, err := zr.GetNextEntry()
 		if err == io.EOF {
-			// iterator over
 			break
 		}
-		entryCnt++
-
-		fmt.Println("Name:", entry.Name)
-		fmt.Println("Comment:", entry.Comment)
-		fmt.Println("IsDir:", entry.IsDir())
-		fmt.Println("ReaderVersion", entry.ReaderVersion)
-		fmt.Println("Mtime:", entry.Modified)
-		fmt.Println("Method:", entry.Method)
-		fmt.Println("hasDataDescriptor: ", entry.hasDataDescriptor())
-		fmt.Println("CompressedSize64:", entry.CompressedSize64)
-		fmt.Println("UncompressedSize64:", entry.UncompressedSize64)
-
-		if !entry.IsDir() {
-			rc, err := entry.Open()
-			if err != nil {
-				t.Fatalf("open zip file entry err: %s", err)
-			}
-
-			entryFile, err := io.ReadAll(rc)
-			if err != nil {
-				t.Fatalf("read entry file contents fail: %s", err)
-			}
-
-			fmt.Println(string(entryFile))
-
-			if err := rc.Close(); err != nil {
-				t.Fatalf("close zip file entry reader err: %s", err)
-			}
+		if err != nil {
+			log.Fatalf("unable to get next entry: %s", err)
 		}
 
-		fmt.Println("------------------------------------------")
-	}
+		log.Println("entry name: ", e.Name)
+		log.Println("entry comment: ", e.Comment)
+		log.Println("entry reader version: ", e.ReaderVersion)
+		log.Println("entry modify time: ", e.Modified)
+		log.Println("entry compressed size: ", e.CompressedSize64)
+		log.Println("entry uncompressed size: ", e.UncompressedSize64)
+		log.Println("entry is a dir: ", e.IsDir())
 
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		t.Fatalf("seek file fail: %s", err)
-	}
-	stat, err := os.Stat("testData/zipiterator.code.zip")
-	az, err := zip.NewReader(f, stat.Size())
-	if len(az.File) != entryCnt {
-		t.Fatalf("expected entry count: %d, actual: %d", len(az.File), entryCnt)
-	}
+		if !e.IsDir() {
+			rc, err := e.Open()
+			if err != nil {
+				log.Fatalf("unable to open zip file: %s", err)
+			}
+			content, err := io.ReadAll(rc)
+			if err != nil {
+				log.Fatalf("read zip file content fail: %s", err)
+			}
 
+			log.Println(string(content))
+
+			if uint64(len(content)) != e.UncompressedSize64 {
+				log.Fatalf("read zip file length not equal with UncompressedSize64")
+			}
+			if err := rc.Close(); err != nil {
+				log.Fatalf("close zip entry reader fail: %s", err)
+			}
+		}
+	}
 }
 
 ```
 
 ## Limitation
 
-- Repeatable read is unsupported.
-- Some `central directory header` field is not resolved, such as "version made by", "internal file attributes", "external file attributes", "relative offset of local header".
+- Every file in zip archive can read only once for a new Reader, Repeated read is unsupported.
+- Some `central directory header` field is not resolved, such as `version made by`, `internal file attributes`, `external file attributes`, `relative offset of local header`, some `central directory header` field may differ from `local file header`, such as `extra field`. 
 - Unable to read multi files concurrently.

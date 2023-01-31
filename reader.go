@@ -43,13 +43,10 @@ type Entry struct {
 	zip.FileHeader
 	r                          io.Reader
 	lr                         io.Reader // LimitReader
-	FileNameLen                int
-	ExtraLen                   int
-	FileName                   string
 	zip64                      bool
 	hasReadNum                 uint64
 	hasDataDescriptorSignature bool
-	readToEnd                  bool
+	eof                        bool
 }
 
 func (e *Entry) hasDataDescriptor() bool {
@@ -62,6 +59,9 @@ func (e *Entry) IsDir() bool {
 }
 
 func (e *Entry) Open() (io.ReadCloser, error) {
+	if e.eof {
+		return nil, errors.New("this file has read to end")
+	}
 	decomp := decompressor(e.Method)
 	if decomp == nil {
 		return nil, zip.ErrAlgorithm
@@ -120,11 +120,9 @@ func (z *Reader) readEntry() (*Entry, error) {
 			CompressedSize64:   uint64(compressedSize),
 			UncompressedSize64: uint64(uncompressedSize),
 		},
-		r:           z.r,
-		FileNameLen: filenameLen,
-		ExtraLen:    extraAreaLen,
-		hasReadNum:  0,
-		readToEnd:   false,
+		r:          z.r,
+		hasReadNum: 0,
+		eof:        false,
 	}
 
 	nameAndExtraBuf := make([]byte, filenameLen+extraAreaLen)
@@ -250,10 +248,10 @@ func (z *Reader) GetNextEntry() (*Entry, error) {
 	if z.localFileEnd {
 		return nil, io.EOF
 	}
-	if z.curEntry != nil && !z.curEntry.readToEnd {
+	if z.curEntry != nil && !z.curEntry.eof {
 		if z.curEntry.hasReadNum <= z.curEntry.UncompressedSize64 {
 			if _, err := io.Copy(io.Discard, z.curEntry.lr); err != nil {
-				return nil, fmt.Errorf("read previous file fail: %w", err)
+				return nil, fmt.Errorf("read previous file data fail: %w", err)
 			}
 			if z.curEntry.hasDataDescriptor() {
 				if err := readDataDescriptor(z.r, z.curEntry); err != nil {
@@ -270,7 +268,7 @@ func (z *Reader) GetNextEntry() (*Entry, error) {
 				return nil, errors.New("parse error, read position exceed entry")
 			} else if readDataLen > dataDescriptorLen-4 {
 				if z.curEntry.hasDataDescriptorSignature {
-					if _, err := io.ReadAll(io.LimitReader(z.r, int64(dataDescriptorLen-readDataLen))); err != nil {
+					if _, err := io.Copy(io.Discard, io.LimitReader(z.r, int64(dataDescriptorLen-readDataLen))); err != nil {
 						return nil, fmt.Errorf("read previous entry's data descriptor fail: %w", err)
 					}
 				} else {
@@ -292,7 +290,7 @@ func (z *Reader) GetNextEntry() (*Entry, error) {
 				}
 			}
 		}
-		z.curEntry.readToEnd = true
+		z.curEntry.eof = true
 	}
 	headerIDBuf := make([]byte, headerIdentifierLen)
 	if _, err := io.ReadFull(z.r, headerIDBuf); err != nil {
@@ -400,7 +398,7 @@ func readDataDescriptor(r io.Reader, entry *Entry) error {
 	if err != nil {
 		return err
 	}
-	entry.readToEnd = true
+	entry.eof = true
 	b := readBuf(buf[:12])
 	if b.uint32() != entry.CRC32 {
 		return zip.ErrChecksum
@@ -424,7 +422,7 @@ type checksumReader struct {
 }
 
 func (r *checksumReader) Read(b []byte) (n int, err error) {
-	if r.entry.readToEnd {
+	if r.entry.eof {
 		return 0, errors.New("reach end of file")
 	}
 	if r.err != nil {
@@ -455,7 +453,7 @@ func (r *checksumReader) Read(b []byte) (n int, err error) {
 			// If there's not a data descriptor, we still compare
 			// the CRC32 of what we've read against the file header
 			// or TOC's CRC32, if it seems like it was set.
-			r.entry.readToEnd = true
+			r.entry.eof = true
 			if r.entry.CRC32 != 0 && r.hash.Sum32() != r.entry.CRC32 {
 				err = zip.ErrChecksum
 			}
