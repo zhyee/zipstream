@@ -84,3 +84,4 @@ func TestNewReader(t *testing.T) {
 
 - Repeatable read is unsupported.
 - Some `central directory header` field is not resolved, such as "version made by", "internal file attributes", "external file attributes", "relative offset of local header".
+- Unable to read multi files concurrently.
