@@ -1,5 +1,5 @@
 # zipiterator
-Package zipiterator is a file iterator for zip archive with no need to supply io.ReaderAt and total size, that is, just only normal io.Reader.
+Package zipiterator is a file iterator for zip archive like Java's `java.util.zip.ZipInputStream`, there is no need to supply io.ReaderAt and zip archive size, that is, just only one regular io.Reader.
 
 ## Implementation
 Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), and reference .ZIP file format specification
