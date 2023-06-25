@@ -1,3 +1,3 @@
-module github.com/zhyee/zipiterator
+module github.com/zhyee/zipstream
 
 go 1.12

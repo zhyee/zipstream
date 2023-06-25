@@ -1,4 +1,4 @@
-package zipiterator
+package zipstream
 
 import (
 	"encoding/binary"

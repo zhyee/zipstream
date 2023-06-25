@@ -1,34 +1,35 @@
-# zipiterator
-Package zipiterator is a file iterator for zip archive like Java's `java.util.zip.ZipInputStream`, there is no need to supply io.ReaderAt and zip archive size, that is, just only one regular io.Reader.
+# zipstream
+Package zipstream is a stream on the fly extractor/reader for zip archive like Java's `java.util.zip.ZipInputStream`, there is no need to provide `io.ReaderAt` and total archive size parameters, that is, just need only one `io.Reader` parameter.
 
 ## Implementation
-Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), and reference .ZIP file format specification
+Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), .ZIP archive format specification reference
 is [here](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
 
 ## Usage
-> go get github.com/zhyee/zipiterator
+> go get github.com/zhyee/zipstream
 
 ## Examples
+
 ```go
 package main
 
 import (
 	"io"
 	"log"
-	"os"
+	"net/http"
 
-	"github.com/zhyee/zipiterator"
+	"github.com/zhyee/zipstream"
 )
 
 func main() {
 
-	f, err := os.Open("./zipiterator.code.zip")
+	resp, err := http.Get("https://github.com/golang/go/archive/refs/tags/go1.16.10.zip")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
+	defer resp.Body.Close()
 
-	zr := zipiterator.NewReader(f)
+	zr := zipstream.NewReader(resp.Body)
 
 	for {
 		e, err := zr.GetNextEntry()
@@ -57,7 +58,7 @@ func main() {
 				log.Fatalf("read zip file content fail: %s", err)
 			}
 
-			log.Println(string(content))
+			log.Println("file length:", len(content))
 
 			if uint64(len(content)) != e.UncompressedSize64 {
 				log.Fatalf("read zip file length not equal with UncompressedSize64")
@@ -68,7 +69,6 @@ func main() {
 		}
 	}
 }
-
 ```
 
 ## Limitation

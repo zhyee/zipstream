@@ -1,22 +1,72 @@
-package zipiterator
+package zipstream
 
 import (
 	"archive/zip"
 	"bytes"
 	"io"
+	"log"
+	"net/http"
 	"os"
 	"testing"
 )
 
+func TestStreamReader(t *testing.T) {
+	resp, err := http.Get("https://github.com/golang/go/archive/refs/tags/go1.16.10.zip")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	zr := NewReader(resp.Body)
+
+	for {
+		e, err := zr.GetNextEntry()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("unable to get next entry: %s", err)
+		}
+
+		log.Println("entry name: ", e.Name)
+		log.Println("entry comment: ", e.Comment)
+		log.Println("entry reader version: ", e.ReaderVersion)
+		log.Println("entry modify time: ", e.Modified)
+		log.Println("entry compressed size: ", e.CompressedSize64)
+		log.Println("entry uncompressed size: ", e.UncompressedSize64)
+		log.Println("entry is a dir: ", e.IsDir())
+
+		if !e.IsDir() {
+			rc, err := e.Open()
+			if err != nil {
+				log.Fatalf("unable to open zip file: %s", err)
+			}
+			content, err := io.ReadAll(rc)
+			if err != nil {
+				log.Fatalf("read zip file content fail: %s", err)
+			}
+
+			log.Println("file length:", len(content))
+
+			if uint64(len(content)) != e.UncompressedSize64 {
+				log.Fatalf("read zip file length not equal with UncompressedSize64")
+			}
+			if err := rc.Close(); err != nil {
+				log.Fatalf("close zip entry reader fail: %s", err)
+			}
+		}
+	}
+}
+
 func TestNewReader(t *testing.T) {
 
-	f, err := os.Open("testData/zipiterator.code.zip")
+	f, err := os.Open("testdata/example.zip")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
 
-	zipFile, err := os.ReadFile("testData/zipiterator.code.zip")
+	zipFile, err := os.ReadFile("testdata/example.zip")
 	if err != nil {
 		t.Fatal(err)
 	}
