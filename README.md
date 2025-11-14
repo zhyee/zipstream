@@ -1,9 +1,8 @@
 # zipstream
-Package zipstream is a stream on the fly extractor/reader for zip archive like Java's `java.util.zip.ZipInputStream`, there is no need to provide `io.ReaderAt` and total archive size parameters, that is, just need only one `io.Reader` parameter.
+Package zipstream is an on-the-fly extractor/reader for zip archive similar as Java's `java.util.zip.ZipInputStream`, there is no need to provide `io.ReaderAt` and archive size, that is, just only one `io.Reader` parameter.
 
 ## Implementation
-Most code of this package is copied directly from golang standard library [archive/zip](https://pkg.go.dev/archive/zip), .ZIP archive format specification reference
-is [here](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+Most code in this package is directly copied from Golang standard [archive/zip](https://pkg.go.dev/archive/zip) library, you can read the `ZIP` specification from [here](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
 
 ## Usage
 > go get github.com/zhyee/zipstream
@@ -31,11 +30,8 @@ func main() {
 
 	zr := zipstream.NewReader(resp.Body)
 
-	for {
-		e, err := zr.GetNextEntry()
-		if err == io.EOF {
-			break
-		}
+	for zr.Next() {
+		e, err := zr.Entry()
 		if err != nil {
 			log.Fatalf("unable to get next entry: %s", err)
 		}
@@ -68,11 +64,14 @@ func main() {
 			}
 		}
 	}
+	if err = zr.Err(); err != nil {
+		log.Fatalf("encounter error: %v", err)
+    }
 }
 ```
 
-## Limitation
+## Limitations
 
-- Every file in zip archive can read only once for a new Reader, Repeated read is unsupported.
-- Some `central directory header` field is not resolved, such as `version made by`, `internal file attributes`, `external file attributes`, `relative offset of local header`, some `central directory header` field may differ from `local file header`, such as `extra field`. 
-- Unable to read multi files concurrently.
+- Repeatable read is not supported, each file in the zip archive can be read only once per `Reader` instance.
+- Some `central directory header` fields are unresolved — including `version made by`, `internal file attributes`, `external file attributes` and `relative offset of local header`. Additionally, certain other `central directory header` fields (e.g., `extra field`) may differ from their counterparts in the `local file header`. 
+- Concurrent reading of multiple files is not supported.

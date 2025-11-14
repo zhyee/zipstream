@@ -2,6 +2,7 @@ package zipstream
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"compress/flate"
 	"encoding/binary"
@@ -75,13 +76,21 @@ func (e *Entry) Open() (io.ReadCloser, error) {
 	}, nil
 }
 
+func (e *Entry) OpenRaw() (io.ReadCloser, error) {
+	return io.NopCloser(e.lr), nil
+}
+
 type Reader struct {
 	r            io.Reader
 	localFileEnd bool
 	curEntry     *Entry
+	err          error
 }
 
 func NewReader(r io.Reader) *Reader {
+	if _, ok := r.(*bufio.Reader); !ok {
+		r = bufio.NewReader(r)
+	}
 	return &Reader{
 		r: r,
 	}
@@ -244,40 +253,52 @@ parseExtras:
 	return entry, nil
 }
 
-func (z *Reader) GetNextEntry() (*Entry, error) {
+// Next indicates whether there is more entry can be read,
+// You can check err to judge if there is any failure when it returns false.
+func (z *Reader) Next() bool {
+	if z.err != nil {
+		return false
+	}
 	if z.localFileEnd {
-		return nil, io.EOF
+		return false
 	}
 	if z.curEntry != nil && !z.curEntry.eof {
 		if z.curEntry.hasReadNum <= z.curEntry.UncompressedSize64 {
 			if _, err := io.Copy(io.Discard, z.curEntry.lr); err != nil {
-				return nil, fmt.Errorf("read previous file data fail: %w", err)
+				z.err = fmt.Errorf("read previous file data fail: %w", err)
+				return false
 			}
 			if z.curEntry.hasDataDescriptor() {
 				if err := readDataDescriptor(z.r, z.curEntry); err != nil {
-					return nil, fmt.Errorf("read previous entry's data descriptor fail: %w", err)
+					z.err = fmt.Errorf("read previous entry's data descriptor fail: %w", err)
+					return false
 				}
 			}
 		} else {
 			if !z.curEntry.hasDataDescriptor() {
-				return nil, errors.New("parse error, read position exceed entry")
+				z.err = errors.New("parse error, read position exceed entry")
+				return false
 			}
 
 			readDataLen := z.curEntry.hasReadNum - z.curEntry.UncompressedSize64
 			if readDataLen > dataDescriptorLen {
-				return nil, errors.New("parse error, read position exceed entry")
+				z.err = errors.New("parse error, read position exceed entry")
+				return false
 			} else if readDataLen > dataDescriptorLen-4 {
 				if z.curEntry.hasDataDescriptorSignature {
 					if _, err := io.Copy(io.Discard, io.LimitReader(z.r, int64(dataDescriptorLen-readDataLen))); err != nil {
-						return nil, fmt.Errorf("read previous entry's data descriptor fail: %w", err)
+						z.err = fmt.Errorf("read previous entry's data descriptor fail: %w", err)
+						return false
 					}
 				} else {
-					return nil, errors.New("parse error, read position exceed entry")
+					z.err = errors.New("parse error, read position exceed entry")
+					return false
 				}
 			} else {
 				buf := make([]byte, dataDescriptorLen-readDataLen)
 				if _, err := io.ReadFull(z.r, buf); err != nil {
-					return nil, fmt.Errorf("read previous entry's data descriptor fail: %w", err)
+					z.err = fmt.Errorf("fail to read previous entry's data descriptor: %w", err)
+					return false
 				}
 				buf = buf[len(buf)-4:]
 				headerID := binary.LittleEndian.Uint32(buf)
@@ -292,24 +313,46 @@ func (z *Reader) GetNextEntry() (*Entry, error) {
 		}
 		z.curEntry.eof = true
 	}
-	headerIDBuf := make([]byte, headerIdentifierLen)
-	if _, err := io.ReadFull(z.r, headerIDBuf); err != nil {
-		return nil, fmt.Errorf("unable to read header identifier: %w", err)
+	headerSigBuf := make([]byte, headerIdentifierLen)
+	if _, err := io.ReadFull(z.r, headerSigBuf); err != nil {
+		z.err = fmt.Errorf("unable to read header identifier: %w", err)
+		return false
 	}
-	headerID := binary.LittleEndian.Uint32(headerIDBuf)
-	if headerID != fileHeaderSignature {
-		if headerID == directoryHeaderSignature || headerID == directoryEndSignature {
+	headerSig := binary.LittleEndian.Uint32(headerSigBuf)
+	if headerSig != fileHeaderSignature {
+		if headerSig == directoryHeaderSignature || headerSig == directoryEndSignature {
 			z.localFileEnd = true
-			return nil, io.EOF
+			return false
 		}
-		return nil, zip.ErrFormat
+		z.err = zip.ErrFormat
+		return false
 	}
+	return true
+}
+
+func (z *Reader) Err() error {
+	return z.err
+}
+
+func (z *Reader) Entry() (*Entry, error) {
 	entry, err := z.readEntry()
 	if err != nil {
 		return nil, fmt.Errorf("unable to read zip file header: %w", err)
 	}
 	z.curEntry = entry
 	return entry, nil
+}
+
+// GetNextEntry return next entry in the zip archive
+// Deprecated, together use Next and Entry instead
+func (z *Reader) GetNextEntry() (*Entry, error) {
+	if z.Next() {
+		return z.Entry()
+	}
+	if z.err != nil {
+		return nil, z.err
+	}
+	return nil, io.EOF
 }
 
 var (
