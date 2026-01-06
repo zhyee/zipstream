@@ -71,7 +71,7 @@ func main() {
 ```
 
 ## Limitations
-
+- The entry's `size`, `compressed size`, `CRC32` may be unknown until the file has been fully read, due to the presence of a `data descriptor`.
 - Repeatable read is not supported, each file in the zip archive can be read only once per `Reader` instance.
 - Some `central directory header` fields are unresolved — including `version made by`, `internal file attributes`, `external file attributes` and `relative offset of local header`. Additionally, certain other `central directory header` fields (e.g., `extra field`) may differ from their counterparts in the `local file header`. 
 - Concurrent reading of multiple files is not supported.

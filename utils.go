@@ -2,6 +2,8 @@ package zipstream
 
 import (
 	"encoding/binary"
+	"io"
+	"sync"
 	"time"
 )
 
@@ -67,4 +69,92 @@ func (b *readBuf) sub(n int) readBuf {
 	b2 := (*b)[:n]
 	*b = (*b)[n:]
 	return b2
+}
+
+type byteReader interface {
+	io.Reader
+	io.ByteReader
+}
+
+type byteCountReader interface {
+	byteReader
+	NRead() uint64
+}
+
+type countableReader struct {
+	byteReader
+	nRead uint64
+}
+
+func (r *countableReader) Read(p []byte) (int, error) {
+	n, err := r.byteReader.Read(p)
+	r.nRead += uint64(n)
+	return n, err
+}
+
+func (r *countableReader) ReadByte() (byte, error) {
+	n, err := r.byteReader.ReadByte()
+	if err == nil {
+		r.nRead++
+	}
+	return n, err
+}
+
+func (r *countableReader) NRead() uint64 {
+	return r.nRead
+}
+
+func countable(r byteReader) byteCountReader {
+	return &countableReader{
+		byteReader: r,
+	}
+}
+
+type limitByteReader struct {
+	*io.LimitedReader
+}
+
+func newLimitByteReader(r byteReader, n int64) *limitByteReader {
+	return &limitByteReader{
+		LimitedReader: &io.LimitedReader{R: r, N: n},
+	}
+}
+
+func (r *limitByteReader) ReadByte() (byte, error) {
+	if r.N <= 0 {
+		return 0, io.EOF
+	}
+	b, err := r.LimitedReader.R.(io.ByteReader).ReadByte()
+	if err == nil {
+		r.N--
+	}
+	return b, err
+}
+
+type syncPool[T any] struct {
+	pool  *sync.Pool
+	reset func(t T) T
+}
+
+func newSyncPool[T any](new func() T, reset func(T) T) *syncPool[T] {
+	return &syncPool[T]{
+		pool: &sync.Pool{
+			New: func() any {
+				return new()
+			},
+		},
+		reset: reset,
+	}
+}
+
+func (p *syncPool[T]) Get() T {
+	t := p.pool.Get().(T)
+	if p.reset != nil {
+		return p.reset(t)
+	}
+	return t
+}
+
+func (p *syncPool[T]) Put(t T) {
+	p.pool.Put(t)
 }
