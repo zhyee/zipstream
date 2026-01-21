@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	rawReaderBufSize         = 16384
 	headerIdentifierLen      = 4
 	fileHeaderLen            = 26
 	dataDescriptorLen        = 16 // four uint32: descriptor signature, crc32, compressed size, size
@@ -39,26 +40,10 @@ const (
 )
 
 var (
-	bufPool = newSyncPool[[]byte](
-		func() []byte {
-			return make([]byte, 0, 1024)
-		},
-		func(b []byte) []byte {
-			return b[:0]
-		},
-	)
-	packetPool = newSyncPool[*readPacket](
-		func() *readPacket {
-			return &readPacket{}
-		},
-		func(packet *readPacket) *readPacket {
-			bufPool.Put(packet.bytes)
-			packet.bytes = nil
-			packet.readOff = 0
-			packet.err = nil
-			return packet
-		},
-	)
+	byteBuf [1]byte
+	bufPool = newSyncPool[[]byte](func() []byte {
+		return make([]byte, rawReaderBufSize)
+	}, nil)
 )
 
 type Entry struct {
@@ -99,6 +84,11 @@ func (e *Entry) Open() (io.ReadCloser, error) {
 	return e.dataReader, nil
 }
 
+// OpenRaw read the entry's original compressed(or stored) data, you must be
+// aware that this method may be significantly slower than the same one in
+// standard package [archive/zip], especially handle the entry with a data
+// descriptor because we must decompress all the file to determine its EOF position.
+// See the Unit Test case BenchmarkOpenRaw for details.
 func (e *Entry) OpenRaw() (io.ReadCloser, error) {
 	if e.eof {
 		return nil, errors.New("this file has read to end")
@@ -472,80 +462,106 @@ func readDataDescriptor(r io.Reader, entry *Entry, zip64 bool) error {
 	return nil
 }
 
-type readPacket struct {
-	bytes   []byte
-	readOff int
-	err     error
-}
-
 type shadowReader struct {
-	ch        chan *readPacket
-	curPacket *readPacket
+	ch     chan []byte
+	buf    []byte
+	offset int
+	size   int
+	err    error
 }
 
 func (s *shadowReader) Read(p []byte) (n int, err error) {
-	if s.curPacket != nil && s.curPacket.readOff < len(s.curPacket.bytes) {
-		n += copy(p, s.curPacket.bytes[s.curPacket.readOff:])
-		s.curPacket.readOff += n
-		if n == len(p) {
-			return
+	var ok bool
+	for n < len(p) {
+		if s.offset >= len(s.buf) {
+			if s.err != nil {
+				return n, s.err
+			}
+			bufPool.Put(s.buf)
+			s.buf, ok = <-s.ch
+			if !ok {
+				return n, io.EOF
+			}
+			s.offset = 0
 		}
+		size := copy(p[n:], s.buf[s.offset:])
+		s.offset += size
+		n += size
 	}
-	for {
-		packet, ok := <-s.ch
-		if !ok {
-			return n, io.EOF
-		}
-		if s.curPacket != nil {
-			packetPool.Put(s.curPacket)
-		}
-		s.curPacket = packet
-		copyN := copy(p[n:], packet.bytes)
-		packet.readOff += copyN
-		n += copyN
-		if packet.err != nil {
-			return n, packet.err
-		}
-		if n == len(p) {
-			return n, nil
-		}
+	if s.offset < len(s.buf) {
+		return n, nil // there is unread data, do not return error
 	}
+	return n, s.err
 }
 
 type readerBridge struct {
 	r      byteReader
+	buf    []byte
+	size   int
+	err    error
 	shadow *shadowReader
+	closed bool
 }
 
 func newReaderBridge(r byteReader) *readerBridge {
+	initBuf := bufPool.Get()
 	return &readerBridge{
-		r: r,
+		r:   r,
+		buf: bufPool.Get(),
 		shadow: &shadowReader{
-			ch: make(chan *readPacket, 128),
+			ch:     make(chan []byte),
+			buf:    initBuf, // avoid nil value checking
+			offset: len(initBuf),
 		},
 	}
 }
 
+func (r *readerBridge) closeChan() {
+	if !r.closed {
+		close(r.shadow.ch)
+		r.closed = true
+	}
+}
+
+func (r *readerBridge) flush(err error) {
+	if r.size > 0 {
+		r.shadow.ch <- r.buf[:r.size]
+		r.size = 0
+	}
+	r.closeChan()
+	if r.err != nil {
+		r.shadow.err = r.err
+		return
+	}
+	r.err = err
+	r.shadow.err = err
+}
+
 func (r *readerBridge) Read(p []byte) (n int, err error) {
-	n, err = r.r.Read(p)
-	packet := packetPool.Get()
-	packet.bytes = append(bufPool.Get(), p[:n]...)
-	packet.err = err
-	r.shadow.ch <- packet
-	return
+	if r.err != nil {
+		return 0, r.err
+	}
+	n, err = r.r.Read(p[:min(len(r.buf)-r.size, len(p))])
+	r.size += copy(r.buf[r.size:], p[:n])
+	r.err = err
+	if err != nil || (r.size >= len(r.buf)) {
+		r.shadow.ch <- r.buf[:r.size]
+		r.buf = bufPool.Get()
+		r.size = 0
+		if err != nil {
+			r.shadow.err = err
+			r.closeChan()
+		}
+	}
+	return n, err
 }
 
 func (r *readerBridge) ReadByte() (byte, error) {
-	b, err := r.r.ReadByte()
-	packet := packetPool.Get()
-	if err != nil {
-		packet.err = err
-		r.shadow.ch <- packet
-	} else {
-		packet.bytes = append(bufPool.Get(), b)
-		r.shadow.ch <- packet
+	n, err := r.Read(byteBuf[:])
+	if n > 0 {
+		return byteBuf[0], err
 	}
-	return b, err
+	return 0, err
 }
 
 type rawReader struct {
@@ -566,19 +582,13 @@ func newRawReader(e *Entry) *rawReader {
 	bridge := newReaderBridge(e.rawReader)
 	fr := flate.NewReader(bridge)
 	go func() {
-		buf := make([]byte, 16384)
+		buf := make([]byte, rawReaderBufSize)
 		for {
 			n, err := fr.Read(buf)
 			rr.uSize += uint64(n)
 			if err != nil {
-				if errors.Is(err, io.EOF) {
-					close(bridge.shadow.ch)
-				} else {
-					packet := packetPool.Get()
-					packet.err = err
-					bridge.shadow.ch <- packet
-					rr.err = err
-				}
+				rr.err = err
+				bridge.flush(err)
 				break
 			}
 		}

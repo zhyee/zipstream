@@ -5,18 +5,18 @@ import (
 	"bytes"
 	"compress/flate"
 	"crypto/rand"
-	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	rand2 "math/rand"
 	"net/http"
 	"os"
-	"strings"
-	"sync"
 	"testing"
-
-	flate2 "github.com/klauspost/compress/flate"
 )
+
+func init() {
+	generateBigZip()
+}
 
 func TestStreamReader(t *testing.T) {
 	resp, err := http.Get("https://github.com/golang/go/archive/refs/tags/go1.16.10.zip")
@@ -415,18 +415,23 @@ func TestZip64DataDescriptor(t *testing.T) {
 
 func TestNewReader(t *testing.T) {
 
-	f, err := os.Open("testdata/example.zip")
+	f, err := os.Open("testdata/data-descriptor.zip")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-
-	zipFile, err := os.ReadFile("testdata/example.zip")
+	info, err := f.Stat()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	az, err := zip.NewReader(f, int64(len(zipFile)))
+	f2, err := os.Open("testdata/data-descriptor.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f2.Close()
+
+	az, err := zip.NewReader(f, info.Size())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,20 +483,35 @@ func TestNewReader(t *testing.T) {
 			if err := rc.Close(); err != nil {
 				t.Fatalf("close zip file entry reader err: %s", err)
 			}
-			_ = ziprc.Close()
 
 			t.Log("------------------------------------")
 			t.Log("file: ", entry.Name)
+			t.Log("comment: ", entry.Comment)
+			t.Log("reader version: ", entry.ReaderVersion)
 			t.Log("CompressedSize64: ", entry.CompressedSize64)
 			t.Log("UncompressedSize64: ", entry.UncompressedSize64)
+			t.Log("flags: ", entry.Flags)
+			t.Log("compress method: ", entry.Method)
+			t.Log("modified: ", entry.Modified)
+			t.Logf("crc32: 0x%x", entry.CRC32)
+			t.Log("----")
+			t.Log("file: ", zf.Name)
+			t.Log("comment: ", zf.Comment)
+			t.Log("reader version: ", zf.ReaderVersion)
+			t.Log("CompressedSize64: ", zf.CompressedSize64)
+			t.Log("UncompressedSize64: ", zf.UncompressedSize64)
+			t.Log("flags: ", zf.Flags)
+			t.Log("compress method: ", zf.Method)
+			t.Log("modified: ", zf.Modified)
+			t.Logf("crc32: 0x%x", zf.CRC32)
+
 			if entry.Comment != zf.Comment ||
-				entry.ReaderVersion != zf.ReaderVersion ||
 				entry.IsDir() != zf.Mode().IsDir() ||
 				entry.Flags != zf.Flags ||
 				entry.Method != zf.Method ||
 				!entry.Modified.Equal(zf.Modified) ||
 				entry.CRC32 != zf.CRC32 ||
-				//bytes.Compare(entry.Extra, zf.Extra) != 0 || // local file header's extra data may not same as central directory header's extra data
+				//bytes.Compare(entry.Extra, zf.Extra) != 0 || // local file header's extra data may be not same as central directory header's extra data
 				entry.CompressedSize64 != zf.CompressedSize64 ||
 				entry.UncompressedSize64 != zf.UncompressedSize64 {
 				t.Fatal("some local file header attr is incorrect")
@@ -508,63 +528,268 @@ func TestNewReader(t *testing.T) {
 
 }
 
-func TestReaderBridge(t *testing.T) {
-	out := &bytes.Buffer{}
-	fw, err := flate.NewWriter(out, flate.BestCompression)
+func generateBigZip() {
+	buf := make([]byte, 1024*7)
+	_, err := io.ReadFull(rand.Reader, buf)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	uSize, err := io.CopyN(fw, rand.Reader, int64(rand2.Intn(1024*1024)))
+	buf = bytes.Repeat(buf, 1024) // 7MB
+	f, err := os.Create("testdata/big.zip")
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	n, err := fw.Write([]byte(strings.Repeat("hello zipstream", 10000)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	uSize += int64(n)
-	if err = fw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	cSize := out.Len()
+	defer f.Close()
 
-	t.Logf("compressedSize: %d, uncompressedSize: %d", cSize, uSize)
-	trailer := "\x01\x02\x03\x04\x05\x06\x07\x08\x09"
-	_, err = out.WriteString(trailer)
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("big.bin")
+	if err != nil {
+		panic(err)
+	}
+	for i := 0; i < 1024; i++ { // 7GB
+		if _, err = w.Write(buf); err != nil {
+			panic(err)
+		}
+	}
+	_, err = w.Write([]byte("\x01\x02\x03\x04\x05\x06\x07\x08\x09")) // 7GB + 9B
+	if err != nil {
+		panic(err)
+	}
+	_, err = zw.Create("dir/")
+	if err != nil {
+		panic(err)
+	}
+
+	w, err = zw.Create("dir/small.txt")
+	if err != nil {
+		panic(err)
+	}
+	_, err = w.Write([]byte("hello small.txt"))
+	if err != nil {
+		panic(err)
+	}
+	err = zw.Close()
+	if err != nil {
+		panic(err)
+	}
+	err = f.Sync()
+	if err != nil {
+		panic(err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("zip size: ", info.Size())
+}
+
+func TestOpenRaw(t *testing.T) {
+
+	f, err := os.Open("testdata/big.zip")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 
-	rb := newReaderBridge(out)
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		rc := flate2.NewReader(rb)
-		defer rc.Close()
-		buf := make([]byte, 4096)
-		for {
-			_, err := rc.Read(buf)
+	zr := NewReader(f)
+
+	for zr.Next() {
+		e, err := zr.Entry()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc, err := e.OpenRaw()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.Copy(io.Discard, rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log("file name: ", e.Name)
+		t.Log("compressed size: ", e.CompressedSize64)
+		t.Log("uncompressed size: ", e.UncompressedSize64)
+		t.Log("compress method: ", e.Method)
+		t.Logf("crc32: 0x%x", e.CRC32)
+		t.Log("is a dir: ", e.IsDir())
+		t.Log("has data descriptor: ", e.hasDataDescriptor())
+		t.Log("-------------------------------------------")
+		err = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if zr.err != nil {
+		t.Fatal(zr.err)
+	}
+}
+
+/*
+goos: darwin
+goarch: arm64
+pkg: github.com/zhyee/zipstream
+cpu: Apple M3
+BenchmarkOpen
+BenchmarkOpen/Open
+BenchmarkOpen/Open-8         	       9	1240596616 ns/op	    5675 B/op	      33 allocs/op
+BenchmarkOpen/standard_Open
+BenchmarkOpen/standard_Open-8         	       8	1336004370 ns/op	   97029 B/op	      59 allocs/op
+*/
+func BenchmarkOpen(b *testing.B) {
+	b.Run("Open", func(b *testing.B) {
+		f, err := os.Open("testdata/big.zip")
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer f.Close()
+
+		for i := 0; i < b.N; i++ {
+			_, err = f.Seek(0, io.SeekStart)
 			if err != nil {
-				if errors.Is(err, io.EOF) {
-					close(rb.shadow.ch)
-					return
+				b.Fatal(err)
+			}
+			zr := NewReader(f)
+
+			for zr.Next() {
+				e, err := zr.Entry()
+				if err != nil {
+					b.Fatal(err)
 				}
-				t.Error(err)
+				rc, err := e.Open()
+				if err != nil {
+					b.Fatal(err)
+				}
+				_, err = io.Copy(io.Discard, rc)
+				if err != nil {
+					b.Fatal(err)
+				}
+				err = rc.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			if zr.err != nil {
+				b.Fatal(zr.err)
 			}
 		}
-	}()
+	})
 
-	cBytes, err := io.ReadAll(rb.shadow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Log("compressed size:", len(cBytes))
-	if len(cBytes) != cSize {
-		t.Fatalf("%d compressed bytes expect, got %d", cSize, len(cBytes))
-	}
-	if out.String() != trailer {
-		t.Fatalf("compressed buf %v expect, got %v", []byte(trailer), out.Bytes())
-	}
-	wg.Wait()
+	b.Run("standard_Open", func(b *testing.B) {
+		f, err := os.Open("testdata/big.zip")
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			b.Fatal(err)
+		}
+		size := info.Size()
+
+		for i := 0; i < b.N; i++ {
+			_, err = f.Seek(0, io.SeekStart)
+			if err != nil {
+				b.Fatal(err)
+			}
+			zr, err := zip.NewReader(f, size)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for _, e := range zr.File {
+				r, err := e.Open()
+				if err != nil {
+					b.Fatal(err)
+				}
+				_, err = io.Copy(io.Discard, r)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+}
+
+/*
+goos: darwin
+goarch: arm64
+pkg: github.com/zhyee/zipstream
+cpu: Apple M3
+BenchmarkOpenRaw
+BenchmarkOpenRaw/OpenRaw
+BenchmarkOpenRaw/OpenRaw-8         	       2	 886253542 ns/op	  192184 B/op	      67 allocs/op
+BenchmarkOpenRaw/standard_OpenRaw
+BenchmarkOpenRaw/standard_OpenRaw-8         	     244	   4877145 ns/op	    6736 B/op	      27 allocs/op
+*/
+func BenchmarkOpenRaw(b *testing.B) {
+	b.Run("OpenRaw", func(b *testing.B) {
+		f, err := os.Open("testdata/big.zip")
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer f.Close()
+
+		for i := 0; i < b.N; i++ {
+			_, err = f.Seek(0, io.SeekStart)
+			if err != nil {
+				b.Fatal(err)
+			}
+			zr := NewReader(f)
+
+			for zr.Next() {
+				e, err := zr.Entry()
+				if err != nil {
+					b.Fatal(err)
+				}
+				rc, err := e.OpenRaw()
+				if err != nil {
+					b.Fatal(err)
+				}
+				_, err = io.Copy(io.Discard, rc)
+				if err != nil {
+					b.Fatal(err)
+				}
+				err = rc.Close()
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			if zr.err != nil {
+				b.Fatal(zr.err)
+			}
+		}
+	})
+
+	b.Run("standard_OpenRaw", func(b *testing.B) {
+		f, err := os.Open("testdata/big.zip")
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			b.Fatal(err)
+		}
+		size := info.Size()
+
+		for i := 0; i < b.N; i++ {
+			_, err = f.Seek(0, io.SeekStart)
+			if err != nil {
+				b.Fatal(err)
+			}
+			zr, err := zip.NewReader(f, size)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for _, e := range zr.File {
+				r, err := e.OpenRaw()
+				if err != nil {
+					b.Fatal(err)
+				}
+				_, err = io.Copy(io.Discard, r)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
 }
