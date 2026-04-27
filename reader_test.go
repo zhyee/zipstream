@@ -629,6 +629,94 @@ func TestOpenRaw(t *testing.T) {
 	}
 }
 
+func TestScanDeflateEOF(t *testing.T) {
+	tests := []struct {
+		name  string
+		level int
+		data  []byte
+	}{
+		{
+			name:  "stored",
+			level: flate.NoCompression,
+			data:  bytes.Repeat([]byte("stored block data"), 4096),
+		},
+		{
+			name:  "dynamic",
+			level: flate.BestCompression,
+			data:  bytes.Repeat([]byte("dynamic huffman data with repetition "), 4096),
+		},
+		{
+			name:  "huffman_only",
+			level: flate.HuffmanOnly,
+			data:  bytes.Repeat([]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, 4096),
+		},
+	}
+
+	trailer := []byte{0x50, 0x4b, 0x07, 0x08, 0xde, 0xad, 0xbe, 0xef}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var compressed bytes.Buffer
+			fw, err := flate.NewWriter(&compressed, tt.level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fw.Write(tt.data); err != nil {
+				t.Fatal(err)
+			}
+			if err := fw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			stream := append(append([]byte(nil), compressed.Bytes()...), trailer...)
+			r := bytes.NewReader(stream)
+			compressedSize, uncompressedSize, err := scanDeflateEOF(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compressedSize != uint64(compressed.Len()) {
+				t.Fatalf("compressed size = %d, want %d", compressedSize, compressed.Len())
+			}
+			if uncompressedSize != uint64(len(tt.data)) {
+				t.Fatalf("uncompressed size = %d, want %d", uncompressedSize, len(tt.data))
+			}
+
+			remaining, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(remaining, trailer) {
+				t.Fatalf("scanner consumed trailer bytes: got %x, want %x", remaining, trailer)
+			}
+		})
+	}
+}
+
+func TestScanDeflateEOFFixedEmptyBlock(t *testing.T) {
+	// Final fixed-Huffman block containing only the end-of-block marker.
+	const compressedSize = 2
+	trailer := []byte{0x50, 0x4b, 0x07, 0x08}
+	stream := append([]byte{0x03, 0x00}, trailer...)
+
+	r := bytes.NewReader(stream)
+	n, uSize, err := scanDeflateEOF(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != compressedSize {
+		t.Fatalf("compressed size = %d, want %d", n, compressedSize)
+	}
+	if uSize != 0 {
+		t.Fatalf("uncompressed size = %d, want 0", uSize)
+	}
+	remaining, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(remaining, trailer) {
+		t.Fatalf("scanner consumed trailer bytes: got %x, want %x", remaining, trailer)
+	}
+}
+
 /*
 goos: darwin
 goarch: arm64
@@ -721,9 +809,9 @@ pkg: github.com/zhyee/zipstream
 cpu: Apple M3
 BenchmarkOpenRaw
 BenchmarkOpenRaw/OpenRaw
-BenchmarkOpenRaw/OpenRaw-8         	       2	 886253542 ns/op	  192184 B/op	      67 allocs/op
+BenchmarkOpenRaw/OpenRaw-8         	       2	 534705375 ns/op	  357496 B/op	     779 allocs/op
 BenchmarkOpenRaw/standard_OpenRaw
-BenchmarkOpenRaw/standard_OpenRaw-8         	     244	   4877145 ns/op	    6736 B/op	      27 allocs/op
+BenchmarkOpenRaw/standard_OpenRaw-8         	     178	   6421114 ns/op	    6750 B/op	      27 allocs/op
 */
 func BenchmarkOpenRaw(b *testing.B) {
 	b.Run("OpenRaw", func(b *testing.B) {

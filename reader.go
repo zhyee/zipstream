@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	rawReaderBufSize         = 16384
+	rawReaderBufSize         = 64 * 1024
 	headerIdentifierLen      = 4
 	fileHeaderLen            = 26
 	dataDescriptorLen        = 16 // four uint32: descriptor signature, crc32, compressed size, size
@@ -40,7 +40,6 @@ const (
 )
 
 var (
-	byteBuf [1]byte
 	bufPool = newSyncPool[[]byte](func() []byte {
 		return make([]byte, rawReaderBufSize)
 	}, nil)
@@ -85,9 +84,9 @@ func (e *Entry) Open() (io.ReadCloser, error) {
 }
 
 // OpenRaw read the entry's original compressed(or stored) data, you must be
-// aware that this method may be significantly slower than the same one in
-// standard package [archive/zip], especially handle the entry with a data
-// descriptor because we must decompress all the file to determine its EOF position.
+// aware that this method may be slower than the same one in standard package
+// [archive/zip], especially handle the entry with a data descriptor because we
+// must scan the deflate stream to determine its EOF position.
 // See the Unit Test case BenchmarkOpenRaw for details.
 func (e *Entry) OpenRaw() (io.ReadCloser, error) {
 	if e.eof {
@@ -123,7 +122,7 @@ type Reader struct {
 func NewReader(r io.Reader) *Reader {
 	br, ok := r.(*bufio.Reader)
 	if !ok {
-		br = bufio.NewReader(r)
+		br = bufio.NewReaderSize(r, rawReaderBufSize)
 	}
 	return &Reader{
 		r: br,
@@ -557,11 +556,23 @@ func (r *readerBridge) Read(p []byte) (n int, err error) {
 }
 
 func (r *readerBridge) ReadByte() (byte, error) {
-	n, err := r.Read(byteBuf[:])
-	if n > 0 {
-		return byteBuf[0], err
+	if r.err != nil {
+		return 0, r.err
 	}
-	return 0, err
+	b, err := r.r.ReadByte()
+	if err != nil {
+		r.err = err
+		r.flush(err)
+		return 0, err
+	}
+	r.buf[r.size] = b
+	r.size++
+	if r.size >= len(r.buf) {
+		r.shadow.ch <- r.buf[:r.size]
+		r.buf = bufPool.Get()
+		r.size = 0
+	}
+	return b, nil
 }
 
 type rawReader struct {
@@ -580,19 +591,15 @@ func newRawReader(e *Entry) *rawReader {
 		return rr
 	}
 	bridge := newReaderBridge(e.rawReader)
-	fr := flate.NewReader(bridge)
 	go func() {
-		buf := make([]byte, rawReaderBufSize)
-		for {
-			n, err := fr.Read(buf)
-			rr.uSize += uint64(n)
-			if err != nil {
-				rr.err = err
-				bridge.flush(err)
-				break
-			}
+		_, uSize, err := scanDeflateEOF(bridge)
+		rr.uSize = uSize
+		if err != nil {
+			rr.err = err
+			bridge.flush(err)
+			return
 		}
-		_ = fr.Close()
+		bridge.flush(io.EOF)
 	}()
 	rr.r = bridge.shadow
 	return rr
