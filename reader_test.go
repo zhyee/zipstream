@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"compress/flate"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	rand2 "math/rand"
 	"net/http"
 	"os"
@@ -529,6 +531,9 @@ func TestNewReader(t *testing.T) {
 }
 
 func generateBigZip() {
+	if _, err := os.Stat("testdata/big.zip"); !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
 	buf := make([]byte, 1024*7)
 	_, err := io.ReadFull(rand.Reader, buf)
 	if err != nil {
